@@ -207,7 +207,89 @@ class Bottleneck(nn.Module):
 
         return out
 
+class DepthwiseSeparableConv(nn.Module):
+    def __init__(self, in_channels, out_channels, kernel_size, stride=1, padding=0, dilation=1):
+        super(DepthwiseSeparableConv, self).__init__()
+        self.depthwise = nn.Conv2d(in_channels, in_channels, kernel_size=kernel_size,
+                                   stride=stride, padding=padding, dilation=dilation, groups=in_channels, bias=False)
+        self.pointwise = nn.Conv2d(in_channels, out_channels, kernel_size=1, bias=False)
 
+    def forward(self, x):
+        x = self.depthwise(x)
+        x = self.pointwise(x)
+        return x
+
+
+class ConvNeXtBlock(nn.Module):
+    def __init__(self, dim, kernel_size=3, padding=1):
+        super().__init__()
+        self.dim = dim
+        self.kernel_size = kernel_size
+        self.padding = padding
+        self.depthwise_conv = nn.Conv2d(dim, dim, kernel_size=kernel_size, padding=padding, groups=dim, bias=False)
+        self.norm = nn.LayerNorm(dim)
+        self.pointwise_conv1 = nn.Linear(dim, 4 * dim)
+        self.pointwise_conv2 = nn.Linear(4 * dim, dim)
+
+
+    def forward(self, x):
+        # x shape: [batch_size, channels, height, width]
+        out = self.depthwise_conv(x)
+        out = out.permute(0, 2, 3, 1)  #
+        out = self.norm(out)
+        out = F.gelu(out)
+        out = self.pointwise_conv1(out)
+        out = F.gelu(out)
+        out = self.pointwise_conv2(out)
+        out = out.permute(0, 3, 1, 2)
+        return x + out
+# class ConvNeXtBlock(nn.Module):
+#     def __init__(self, dim, kernel_size=3, padding=1):
+#         super().__init__()
+#         self.dim = dim
+#         self.kernel_size = kernel_size
+#         self.padding = padding
+#
+#         # Define multiple branches
+#         self.branch1 = nn.Sequential(
+#             nn.Conv2d(dim, dim, kernel_size=1, padding=0, bias=False),
+#             nn.GroupNorm(num_groups=2, num_channels=dim),
+#             nn.ReLU(inplace=True)
+#         )
+#         # self.branch1 = nn.Conv2d(dim, dim, kernel_size=1, padding=padding, bias=False)
+#         self.branch2 = nn.Sequential(
+#             nn.Conv2d(dim, dim, kernel_size=3, padding=1, bias=False),
+#             nn.GroupNorm(num_groups=2, num_channels=dim),
+#             nn.ReLU(inplace=True)
+#         )
+#         self.branch3 = nn.Sequential(
+#             nn.Conv2d(dim, dim, kernel_size=5, padding=2, bias=False),
+#             nn.GroupNorm(num_groups=2, num_channels=dim),
+#             nn.ReLU(inplace=True)
+#         )
+#
+#         # Define pointwise convolutions
+#         self.pointwise_conv1 = nn.Conv2d(3 * dim, 4 * dim, kernel_size=1, bias=False)
+#         self.pointwise_conv2 = nn.Conv2d(4 * dim, dim, kernel_size=1, bias=False)
+#
+#     def forward(self, x):
+#         # Apply branches
+#         x = x
+#         branch1_output = self.branch1(x)
+#         branch2_output = self.branch2(x)
+#         branch3_output = self.branch3(x)
+#
+#         # Concatenate branch outputs
+#         concatenated_output = torch.cat([branch1_output, branch2_output, branch3_output], dim=1)
+#
+#         # Apply pointwise convolutions
+#         out = self.pointwise_conv1(concatenated_output)
+#         out = F.gelu(out)
+#         out = self.pointwise_conv2(out)
+#
+#         # Add residual connection
+#         out = x + out
+#         return out
 class ResNet(nn.Module):
 
     def __init__(self, block, layers, output_stride, BatchNorm, pretrained=True):
