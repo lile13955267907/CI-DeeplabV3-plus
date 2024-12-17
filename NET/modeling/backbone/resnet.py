@@ -185,6 +185,8 @@ class Bottleneck(nn.Module):
         self.stride = stride
         self.dilation = dilation
 
+
+
     def forward(self, x):
         residual = x
 
@@ -207,91 +209,27 @@ class Bottleneck(nn.Module):
 
         return out
 
-class DepthwiseSeparableConv(nn.Module):
-    def __init__(self, in_channels, out_channels, kernel_size, stride=1, padding=0, dilation=1):
-        super(DepthwiseSeparableConv, self).__init__()
-        self.depthwise = nn.Conv2d(in_channels, in_channels, kernel_size=kernel_size,
-                                   stride=stride, padding=padding, dilation=dilation, groups=in_channels, bias=False)
-        self.pointwise = nn.Conv2d(in_channels, out_channels, kernel_size=1, bias=False)
-
-    def forward(self, x):
-        x = self.depthwise(x)
-        x = self.pointwise(x)
-        return x
 
 
-class ConvNeXtBlock(nn.Module):
-    def __init__(self, dim, kernel_size=3, padding=1):
+class InceptionDWConv2d(nn.Module):
+    def __init__(self, in_channels, square_kernel_size=3, band_kernel_size=11, branch_ratio=0.125):
         super().__init__()
-        self.dim = dim
-        self.kernel_size = kernel_size
-        self.padding = padding
-        self.depthwise_conv = nn.Conv2d(dim, dim, kernel_size=kernel_size, padding=padding, groups=dim, bias=False)
-        self.norm = nn.LayerNorm(dim)
-        self.pointwise_conv1 = nn.Linear(dim, 4 * dim)
-        self.pointwise_conv2 = nn.Linear(4 * dim, dim)
 
+        gc = int(in_channels * branch_ratio) # channel numbers of a convolution branch
+        self.dwconv_hw = nn.Conv2d(gc, gc, square_kernel_size, padding=square_kernel_size // 2, groups=gc)
+        self.dwconv_w = nn.Conv2d(gc, gc, kernel_size=(1, band_kernel_size), padding=(0, band_kernel_size // 2),
+                                    groups=gc)
+        self.dwconv_h = nn.Conv2d(gc, gc, kernel_size=(band_kernel_size, 1), padding=(band_kernel_size // 2, 0),
+                                    groups=gc)
+        self.split_indexes = (in_channels - 3* gc, gc, gc, gc)
 
     def forward(self, x):
-        # x shape: [batch_size, channels, height, width]
-        out = self.depthwise_conv(x)
-        out = out.permute(0, 2, 3, 1)  #
-        out = self.norm(out)
-        out = F.gelu(out)
-        out = self.pointwise_conv1(out)
-        out = F.gelu(out)
-        out = self.pointwise_conv2(out)
-        out = out.permute(0, 3, 1, 2)
-        return x + out
-# class ConvNeXtBlock(nn.Module):
-#     def __init__(self, dim, kernel_size=3, padding=1):
-#         super().__init__()
-#         self.dim = dim
-#         self.kernel_size = kernel_size
-#         self.padding = padding
-#
-#         # Define multiple branches
-#         self.branch1 = nn.Sequential(
-#             nn.Conv2d(dim, dim, kernel_size=1, padding=0, bias=False),
-#             nn.GroupNorm(num_groups=2, num_channels=dim),
-#             nn.ReLU(inplace=True)
-#         )
-#         # self.branch1 = nn.Conv2d(dim, dim, kernel_size=1, padding=padding, bias=False)
-#         self.branch2 = nn.Sequential(
-#             nn.Conv2d(dim, dim, kernel_size=3, padding=1, bias=False),
-#             nn.GroupNorm(num_groups=2, num_channels=dim),
-#             nn.ReLU(inplace=True)
-#         )
-#         self.branch3 = nn.Sequential(
-#             nn.Conv2d(dim, dim, kernel_size=5, padding=2, bias=False),
-#             nn.GroupNorm(num_groups=2, num_channels=dim),
-#             nn.ReLU(inplace=True)
-#         )
-#
-#         # Define pointwise convolutions
-#         self.pointwise_conv1 = nn.Conv2d(3 * dim, 4 * dim, kernel_size=1, bias=False)
-#         self.pointwise_conv2 = nn.Conv2d(4 * dim, dim, kernel_size=1, bias=False)
-#
-#     def forward(self, x):
-#         # Apply branches
-#         x = x
-#         branch1_output = self.branch1(x)
-#         branch2_output = self.branch2(x)
-#         branch3_output = self.branch3(x)
-#
-#         # Concatenate branch outputs
-#         concatenated_output = torch.cat([branch1_output, branch2_output, branch3_output], dim=1)
-#
-#         # Apply pointwise convolutions
-#         out = self.pointwise_conv1(concatenated_output)
-#         out = F.gelu(out)
-#         out = self.pointwise_conv2(out)
-#
-#         # Add residual connection
-#         out = x + out
-#         return out
-class ResNet(nn.Module):
+        x_id, x_hw, x_w, x_h = torch.split(x, self.split_indexes, dim=1)
+        return torch.cat((x_id, self.dwconv_hw(x_hw), self.dwconv_w(x_w), self.dwconv_h(x_h)), dim=1,)
 
+
+
+class ResNet(nn.Module):
     def __init__(self, block, layers, output_stride, BatchNorm, pretrained=True):
         self.inplanes = 64
         super(ResNet, self).__init__()
@@ -306,21 +244,12 @@ class ResNet(nn.Module):
             raise NotImplementedError
 
         # Modules
-        self.enhance_low_level_features_module = nn.Sequential(
-            DepthwiseSeparableConv(64, 128, 3, 1, 1),
-            BatchNorm(128),
-            nn.ReLU(inplace=True),
-            nn.Conv2d(128, 64, 1, 1, 0),
-            BatchNorm(64),
-            nn.ReLU(inplace=True)
-        )
         self.conv1 = nn.Conv2d(3, 64, kernel_size=7, stride=2, padding=3,
                                 bias=False)
         self.bn1 = nn.GroupNorm(num_groups=2, num_channels=64)
         self.relu = nn.ReLU(inplace=True)
         self.maxpool = nn.MaxPool2d(kernel_size=3, stride=2, padding=1)
-        self.depthwise_separable_conv = DepthwiseSeparableConv(64, 64, kernel_size=3, stride=1, padding=1)
-        self.convnext_block = ConvNeXtBlock(dim=64)
+        self.ICDW = InceptionDWConv2d(64)
         self.relu_dsc = nn.ReLU(inplace=True)
 
         self.layer1 = self._make_layer(block, 64, layers[0], stride=strides[0], dilation=dilations[0], BatchNorm=BatchNorm)
@@ -369,20 +298,16 @@ class ResNet(nn.Module):
 
         return nn.Sequential(*layers)
 
-    def enhance_low_level_features(self, x):
-        return self.enhance_low_level_features_module(x)
+
 
     def forward(self, input):
         x = self.conv1(input)
         x = self.bn1(x)
         x = self.relu(x)
-        feature_x = x
-        x = self.enhance_low_level_features(x)
-        x = feature_x + x
         x = self.maxpool(x)
 
 
-        x = self.convnext_block(x)
+        x = self.ICDW(x)
         x = self.layer1(x)
         low_level_feat = x
         x = self.layer2(x)
